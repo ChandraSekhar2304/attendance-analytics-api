@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Path, Query, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError, PyMongoError
@@ -880,6 +880,12 @@ def build_department_trend_pipeline(
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
+@app.get("/", include_in_schema=False)
+def root():
+    """Redirect root path to interactive Swagger API docs."""
+    return RedirectResponse(url="/docs")
+
+
 @app.get("/health", tags=["system"])
 def health():
     """Readiness probe. Returns 200 only if MongoDB answers a ping, otherwise 503."""
