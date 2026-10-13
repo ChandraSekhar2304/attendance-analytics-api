@@ -138,10 +138,12 @@ def ms_to_dt(ms: int) -> datetime:
     return datetime.fromtimestamp(truncated / 1000, tz=timezone.utc)
 
 
-def dt_to_ms(dt: Optional[datetime]) -> Optional[int]:
-    """Convert BSON datetime to epoch milliseconds."""
+def dt_to_ms(dt: Optional[Union[datetime, int, float]]) -> Optional[int]:
+    """Convert BSON datetime or numeric instant to truncated epoch milliseconds."""
     if dt is None:
         return None
+    if isinstance(dt, (int, float)):
+        return truncate_ms(int(dt))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return truncate_ms(int(dt.timestamp() * 1000))
