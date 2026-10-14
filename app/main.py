@@ -386,7 +386,7 @@ def build_attendance_list_query(
     emp_code: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    status: Optional[str] = None,
+    status_filter: Optional[str] = None,
     page: int = 1,
     page_size: int = 20,
 ) -> Tuple[str, Dict[str, Any], List[Tuple[str, int]], int, int]:
@@ -399,8 +399,8 @@ def build_attendance_list_query(
             q["date"]["$gte"] = date_from
         if date_to:
             q["date"]["$lte"] = date_to
-    if status:
-        q["status"] = status
+    if status_filter is not None:
+        q["status"] = status_filter
 
     sort_spec = [("date", DESCENDING), ("emp_code", ASCENDING)]
     skip = (page - 1) * page_size
@@ -1219,7 +1219,7 @@ def list_attendance(
     emp_code: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    status: Optional[Status] = None,
+    status_filter: Optional[Status] = Query(None, alias="status"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
@@ -1238,12 +1238,12 @@ def list_attendance(
     if date_from and date_to and date_from > date_to:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="date_from must be <= date_to")
 
-    st_val = status.value if status else None
+    st_val = status_filter.value if status_filter else None
     col, q, sort_spec, skip, limit = build_attendance_list_query(
         emp_code=emp_code,
         date_from=date_from,
         date_to=date_to,
-        status=st_val,
+        status_filter=st_val,
         page=page,
         page_size=page_size,
     )
