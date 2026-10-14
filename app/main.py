@@ -476,7 +476,7 @@ def build_department_summary_pipeline(
     month_end = f"{month}-{last_day:02d}"
 
     match_stage: Dict[str, Any] = {"joined_on": {"$lte": month_end}}
-    if department:
+    if department is not None:
         match_stage["department"] = department
 
     pipeline = [
@@ -502,6 +502,13 @@ def build_department_summary_pipeline(
                             "date": 1,
                             "status": 1,
                             "work_hours": 1,
+                            "wh_cents": {
+                                "$cond": [
+                                    {"$ne": ["$work_hours", None]},
+                                    {"$toLong": {"$round": [{"$multiply": ["$work_hours", 100]}, 0]}},
+                                    None,
+                                ]
+                            },
                             "half_day": {"$ifNull": ["$half_day", False]},
                             "late_minutes": {"$ifNull": ["$late_minutes", 0]},
                             "day_of_week": {
@@ -539,7 +546,7 @@ def build_department_summary_pipeline(
                         }
                     }
                 },
-                "emp_work_hours_sum": {
+                "emp_work_hours_cents": {
                     "$sum": {
                         "$map": {
                             "input": "$logs",
@@ -549,11 +556,11 @@ def build_department_summary_pipeline(
                                     {
                                         "$and": [
                                             {"$in": ["$$l.status", ["PRESENT", "WFH", "ON_DUTY"]]},
-                                            {"$ne": ["$$l.work_hours", None]},
+                                            {"$ne": ["$$l.wh_cents", None]},
                                         ]
                                     },
-                                    "$$l.work_hours",
-                                    0.0,
+                                    "$$l.wh_cents",
+                                    0,
                                 ]
                             },
                         }
@@ -632,7 +639,7 @@ def build_department_summary_pipeline(
                 "_id": "$department",
                 "headcount": {"$sum": 1},
                 "present_days": {"$sum": "$emp_present_days"},
-                "total_work_hours": {"$sum": "$emp_work_hours_sum"},
+                "total_wh_cents": {"$sum": "$emp_work_hours_cents"},
                 "work_hours_count": {"$sum": "$emp_work_hours_count"},
                 "late_count": {"$sum": "$emp_late_count"},
                 "total_late_minutes": {"$sum": "$emp_total_late_minutes"},
@@ -849,7 +856,21 @@ def build_department_trend_pipeline(
                 "headcount": 1,
                 "present_count": 1,
                 "late_count": 1,
-                "attendance_rate": {
+                "present2": {
+                    "$toInt": {
+                        "$round": [{"$multiply": ["$present_count", 2]}, 0]
+                    }
+                },
+            }
+        },
+        {
+            "$project": {
+                "date": 1,
+                "is_working_day": 1,
+                "headcount": 1,
+                "present_count": 1,
+                "late_count": 1,
+                "rate_units": {
                     "$cond": [
                         {
                             "$and": [
@@ -857,7 +878,19 @@ def build_department_trend_pipeline(
                                 {"$gt": ["$headcount", 0]},
                             ]
                         },
-                        {"$divide": ["$present_count", "$headcount"]},
+                        {
+                            "$floor": {
+                                "$divide": [
+                                    {
+                                        "$add": [
+                                            {"$multiply": ["$present2", 10000]},
+                                            "$headcount",
+                                        ]
+                                    },
+                                    {"$multiply": [2, "$headcount"]},
+                                ]
+                            }
+                        },
                         None,
                     ]
                 },
@@ -867,8 +900,8 @@ def build_department_trend_pipeline(
             "$setWindowFields": {
                 "sortBy": {"date": ASCENDING},
                 "output": {
-                    "moving_avg_7d": {
-                        "$avg": "$attendance_rate",
+                    "avg_units": {
+                        "$avg": "$rate_units",
                         "window": {"documents": [-6, 0]},
                     }
                 },
@@ -1304,9 +1337,14 @@ def employee_monthly(
         total_late = 0
         total_ot = 0
 
-    attendance_pct = (
-        round_half_up((present_days / working_days) * 100, 2) if working_days > 0 else None
-    )
+    if working_days > 0:
+        present2 = int(round(present_days * 2))
+        pct = (Decimal(present2 * 50) / Decimal(working_days)).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        attendance_pct = float(pct)
+    else:
+        attendance_pct = None
 
     return {
         "emp_code": emp_code,
@@ -1337,9 +1375,16 @@ def department_summary(
         if headcount == 0:
             continue
         present_days = float(row.get("present_days", 0.0))
-        wh_sum = float(row.get("total_work_hours", 0.0))
         wh_cnt = int(row.get("work_hours_count", 0))
-        avg_wh = round_half_up(wh_sum / wh_cnt, 2) if wh_cnt > 0 else None
+        total_cents = int(row.get("total_wh_cents", 0))
+        if wh_cnt > 0:
+            avg_wh = float(
+                (Decimal(total_cents) / (Decimal(wh_cnt) * 100)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            )
+        else:
+            avg_wh = None
 
         items.append(
             {
@@ -1410,13 +1455,17 @@ def department_trend(
     col, pipeline = build_department_trend_pipeline(department, from_date_str, to_date_str)
     agg_res = list(db.employees.aggregate(pipeline))
 
-    # Apply 4-decimal half-up rounding on reported rates
+    # Apply exact Decimal formatting on reported rates
     items = []
     for row in agg_res:
-        raw_rate = row.get("attendance_rate")
-        rate = round_half_up(raw_rate, 4) if raw_rate is not None else None
-        raw_mavg = row.get("moving_avg_7d")
-        mavg = round_half_up(raw_mavg, 4) if raw_mavg is not None else None
+        rate_units = row.get("rate_units")
+        avg_units = row.get("avg_units")
+        attendance_rate = float(Decimal(rate_units) / Decimal(10000)) if rate_units is not None else None
+        moving_avg_7d = (
+            float(Decimal(str(avg_units)).quantize(Decimal(1), ROUND_HALF_UP) / Decimal(10000))
+            if avg_units is not None
+            else None
+        )
 
         items.append(
             {
@@ -1425,8 +1474,8 @@ def department_trend(
                 "headcount": int(row.get("headcount", 0)),
                 "present_count": float(row.get("present_count", 0.0)),
                 "late_count": int(row.get("late_count", 0)),
-                "attendance_rate": rate,
-                "moving_avg_7d": mavg,
+                "attendance_rate": attendance_rate,
+                "moving_avg_7d": moving_avg_7d,
             }
         )
 
