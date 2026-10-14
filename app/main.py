@@ -1183,11 +1183,22 @@ def regularize_attendance(
             "changes": changes_bson,
         }
 
-        # Optimistic concurrency check: match specific document ID and history length
-        hist_len = len(rec.get("history", []))
+        # Optimistic concurrency check: match specific document ID, status, punch times, and history
+        hist = rec.get("history")
+        hist_len = len(hist) if hist is not None else 0
+        if hist_len == 0:
+            hist_clause = {"$or": [{"history": {"$size": 0}}, {"history": {"$exists": False}}]}
+        else:
+            hist_clause = {"history": {"$size": hist_len}}
+
         update_filter = {
-            "_id": rec["_id"],
-            "history": {"$size": hist_len},
+            "$and": [
+                {"_id": rec["_id"]},
+                {"status": rec["status"]},
+                {"punch_in": rec.get("punch_in")},
+                {"punch_out": rec.get("punch_out")},
+                hist_clause,
+            ]
         }
 
         update_fields = {
