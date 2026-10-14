@@ -1038,7 +1038,7 @@ def punch_out(body: PunchOutRequest):
 @app.patch("/attendance/{emp_code}/{date}", tags=["attendance"])
 def regularize_attendance(
     body: RegularizeRequest,
-    emp_code: str = Path(..., pattern=r"^EMP\d{4,6}$"),
+    emp_code: str = Path(...),
     date_str: str = Path(..., alias="date"),
 ):
     """
@@ -1267,7 +1267,7 @@ def list_attendance(
 
 @app.get("/analytics/employees/{emp_code}/monthly", tags=["analytics"])
 def employee_monthly(
-    emp_code: str = Path(..., pattern=r"^EMP\d{4,6}$"),
+    emp_code: str = Path(...),
     month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
 ):
     """Monthly attendance summary for one employee."""
