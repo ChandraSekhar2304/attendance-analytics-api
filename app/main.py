@@ -6,6 +6,7 @@ Single-file service satisfying OpenAPI 3.0.3 contract and business rules R1-R10.
 from __future__ import annotations
 
 import calendar
+from contextlib import asynccontextmanager
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import enum
@@ -37,20 +38,20 @@ IST = timezone(timedelta(hours=5, minutes=30))
 client: MongoClient = MongoClient(MONGO_URI, tz_aware=True, serverSelectionTimeoutMS=2000)
 db = client[MONGO_DB]
 
-app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
+_indexes_ready = False
 
 
 # --------------------------------------------------------------------------- #
 # Database Indexes Setup
 # --------------------------------------------------------------------------- #
-def init_db_indexes() -> None:
+def init_db_indexes() -> bool:
     """Create all required indexes idempotently without raising if Mongo is briefly unavailable."""
+    global _indexes_ready
     try:
         # employees indexes
         db.employees.create_index([("emp_code", ASCENDING)], unique=True, name="idx_emp_code_unique")
         db.employees.create_index([("department", ASCENDING), ("emp_code", ASCENDING)], name="idx_dept_emp_code")
         db.employees.create_index([("joined_on", ASCENDING), ("department", ASCENDING)], name="idx_joined_dept")
-        db.employees.create_index([("department", ASCENDING), ("joined_on", ASCENDING)], name="idx_dept_joined")
 
         # attendance_logs indexes
         db.attendance_logs.create_index(
@@ -58,9 +59,6 @@ def init_db_indexes() -> None:
         )
         db.attendance_logs.create_index(
             [("date", DESCENDING), ("emp_code", ASCENDING)], name="idx_date_desc_emp_asc"
-        )
-        db.attendance_logs.create_index(
-            [("date", ASCENDING), ("emp_code", ASCENDING)], name="idx_date_asc_emp_asc"
         )
         db.attendance_logs.create_index(
             [("status", ASCENDING), ("date", DESCENDING), ("emp_code", ASCENDING)], name="idx_status_date_emp"
@@ -71,14 +69,20 @@ def init_db_indexes() -> None:
         db.attendance_logs.create_index(
             [("date", ASCENDING), ("late_minutes", ASCENDING)], name="idx_date_late_minutes"
         )
+        _indexes_ready = True
+        return True
     except PyMongoError:
         # Non-fatal during early startup; /health probe will signal 503 until Mongo is ready
-        pass
+        return False
 
 
-@app.on_event("startup")
-def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
     init_db_indexes()
+    yield
+
+
+app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0", lifespan=lifespan)
 
 
 # --------------------------------------------------------------------------- #
@@ -391,13 +395,13 @@ def build_attendance_list_query(
     page_size: int = 20,
 ) -> Tuple[str, Dict[str, Any], List[Tuple[str, int]], int, int]:
     q: Dict[str, Any] = {}
-    if emp_code:
+    if emp_code is not None:
         q["emp_code"] = emp_code
-    if date_from or date_to:
+    if date_from is not None or date_to is not None:
         q["date"] = {}
-        if date_from:
+        if date_from is not None:
             q["date"]["$gte"] = date_from
-        if date_to:
+        if date_to is not None:
             q["date"]["$lte"] = date_to
     if status_filter is not None:
         q["status"] = status_filter
@@ -685,7 +689,7 @@ def build_late_leaderboard_pipeline(
         {"$unwind": "$emp"},
     ]
 
-    if department:
+    if department is not None:
         pipeline.append({"$match": {"emp.department": department}})
 
     pipeline.extend(
@@ -924,8 +928,11 @@ def root():
 @app.get("/health", tags=["system"])
 def health():
     """Readiness probe. Returns 200 only if MongoDB answers a ping, otherwise 503."""
+    global _indexes_ready
     try:
         client.admin.command("ping")
+        if not _indexes_ready:
+            init_db_indexes()
         return {"status": "ok"}
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Database unavailable: {str(e)}")
@@ -1509,7 +1516,7 @@ def explain_endpoint(
             emp_code=emp_code,
             date_from=date_from,
             date_to=date_to,
-            status=st_val,
+            status_filter=st_val,
             page=page or 1,
             page_size=page_size or 20,
         )
